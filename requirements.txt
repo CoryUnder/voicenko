@@ -1,4 +1,4 @@
 python-telegram-bot==20.3
-openai
-pydub
-python-dotenv
+openai==1.92.2
+python-dotenv==1.1.1
+ffmpeg-python==0.2.0
