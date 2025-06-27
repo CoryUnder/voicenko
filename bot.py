@@ -1,60 +1,32 @@
 import os
-import logging
-from dotenv import load_dotenv
+import openai
+import ffmpeg
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from openai import OpenAI
-from pydub import AudioSegment
-import uuid
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from dotenv import load_dotenv
 
-# Завантаження .env
 load_dotenv()
-
-# Налаштування
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
 
-# Логування
-logging.basicConfig(level=logging.INFO)
-
-# OpenAI
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# FFmpeg шлях (для Render/хостингу не потрібно)
-AudioSegment.converter = "ffmpeg"  # або повний шлях, якщо локально
-
-# Обробка голосових повідомлень
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    file = await context.bot.get_file(update.message.voice.file_id)
+    voice = update.message.voice
+    file = await context.bot.get_file(voice.file_id)
+    ogg_path = "voice.ogg"
+    mp3_path = "voice.mp3"
 
-    # Завантажуємо файл
-    ogg_path = f"{uuid.uuid4()}.ogg"
-    wav_path = f"{uuid.uuid4()}.wav"
     await file.download_to_drive(ogg_path)
 
-    # Конвертація .ogg → .wav
-    sound = AudioSegment.from_file(ogg_path)
-    sound.export(wav_path, format="wav")
+    # Конвертуємо .ogg в .mp3
+    ffmpeg.input(ogg_path).output(mp3_path).run(overwrite_output=True)
 
-    # Розпізнавання через OpenAI Whisper
-    with open(wav_path, "rb") as audio_file:
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file
-        )
+    # Відправляємо в Whisper
+    with open(mp3_path, "rb") as audio_file:
+        transcript = openai.Audio.transcribe("whisper-1", audio_file)
+    
+    await update.message.reply_text(transcript["text"])
 
-    # Відправляємо розпізнаний текст
-    await update.message.reply_text(f"📝 Розпізнаний текст:\n{transcript.text}")
-
-    # Очищення
-    os.remove(ogg_path)
-    os.remove(wav_path)
-
-# Головна функція
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+app.run_polling()
