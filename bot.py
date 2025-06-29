@@ -1,61 +1,83 @@
 import os
 import logging
-import ffmpeg
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-from openai import OpenAI
-from uuid import uuid4
+import tempfile
 
-# Логи
+import httpx
+import ffmpeg
+
+from telegram import Update
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes, CommandHandler
+from openai import OpenAI
+
+# Ініціалізація логування
 logging.basicConfig(level=logging.INFO)
 
-# Токени
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+# Змінні середовища
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBHOOK_URL = "https://worker-production-b2dd.up.railway.app"
 
-# OpenAI клієнт
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Привітання
+# Привітання при /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Привіт! Це бот, який розпізнає голосові повідомлення та перетворює їх на текст.\n\n"
-        "🎙 Надішли мені голосове повідомлення — і я розшифрую його в текст.\n\n"
-        "⚠️ Підтримуються тільки повідомлення, записані у Telegram (формат .ogg)."
+        "👋 Привіт! Надішли мені голосове повідомлення — я розпізнаю його текст.\n\n"
+        "🎙 Підтримуються короткі повідомлення (до 1 хв).\n"
+        "❗ Якщо буде помилка — я скажу."
     )
 
-# Обробка голосу
+# Обробка голосових повідомлень
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    voice = update.message.voice
-    file = await context.bot.get_file(voice.file_id)
-    ogg_path = f"{uuid4()}.ogg"
-    mp3_path = f"{uuid4()}.mp3"
+    user = update.effective_user
 
-    await file.download_to_drive(ogg_path)
+    # Повідомлення що бот працює
+    await update.message.reply_text("🔄 Обробляю голосове повідомлення...")
 
-    # Конвертація ogg → mp3
-    ffmpeg.input(ogg_path).output(mp3_path).run(overwrite_output=True)
+    try:
+        # Отримання файлу
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
 
-    # Відправка в OpenAI
-    with open(mp3_path, "rb") as f:
-        transcript = client.audio.transcriptions.create(model="whisper-1", file=f)
+        # Збереження .ogg файлу
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ogg_path = os.path.join(tmp_dir, "audio.ogg")
+            mp3_path = os.path.join(tmp_dir, "audio.mp3")
 
-    await update.message.reply_text(f"📝 Текст повідомлення:\n{transcript.text}")
+            await file.download_to_drive(ogg_path)
 
-    # Очистка
-    os.remove(ogg_path)
-    os.remove(mp3_path)
+            # Конвертація в mp3
+            ffmpeg.input(ogg_path).output(mp3_path).run(overwrite_output=True)
 
-# Ініціалізація
-app = ApplicationBuilder().token(BOT_TOKEN).build()
+            # Відкриття файлу для OpenAI
+            with open(mp3_path, "rb") as audio_file:
+                transcription = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file
+                )
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+            text = transcription.text.strip()
+            if text:
+                await update.message.reply_text(f"📝 Ось ваш текст:\n\n{text}")
+            else:
+                await update.message.reply_text("⚠️ Не вдалося розпізнати голос. Спробуйте ще раз.")
+    except Exception as e:
+        logging.exception("Помилка при обробці голосу:")
+        await update.message.reply_text("❌ Сталася помилка під час обробки. Спробуйте пізніше.")
 
-# Webhook-запуск
-app.run_webhook(
-    listen="0.0.0.0",
-    port=int(os.environ.get("PORT", 8080)),
-    webhook_url=WEBHOOK_URL
-)
+# Старт бота
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Команди
+    app.add_handler(CommandHandler("start", start))
+
+    # Голосові повідомлення
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+
+    # Запуск через webhook
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", 8000)),
+        webhook_url=f"{WEBHOOK_URL}/"
+    )
