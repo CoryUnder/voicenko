@@ -1,65 +1,81 @@
 import os
 import logging
-import tempfile
-import ffmpeg
+import subprocess
+import time
+
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from openai import OpenAI, RateLimitError, AuthenticationError
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    CommandHandler,
+    ContextTypes,
+    filters,
+)
+from openai import OpenAI, OpenAIError
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-DOMAIN = os.environ.get("DOMAIN")  # наприклад: 'https://worker-production-b2dd.up.railway.app'
+# Ініціалізація OpenAI
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-client = OpenAI(api_key=OPENAI_API_KEY)
-
+# Встановлення логування
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Привіт! Надішліть голосове повідомлення, і я розпізнаю його в текст.")
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Цей бот працює тільки з голосовими повідомленнями. Надішліть голосове!")
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    await message.reply_text("🎧 Отримано голосове повідомлення. Обробляю його...")
-
     try:
-        file = await context.bot.get_file(message.voice.file_id)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".oga") as ogg_file:
-            await file.download_to_drive(custom_path=ogg_file.name)
-            ogg_path = ogg_file.name
+        file = await context.bot.get_file(update.message.voice.file_id)
+        ogg_path = "voice.ogg"
+        mp3_path = "voice.mp3"
+        await file.download_to_drive(ogg_path)
 
-        mp3_path = ogg_path.replace(".oga", ".mp3")
+        await update.message.reply_text("🧠 Обробляю голос...")
 
-        for i in range(1, 11):
-            await message.reply_text(f"🔄 Обробка {i * 10}%")
+        # Прелоадер (імітація)
+        for i in range(0, 101, 25):
+            await update.message.reply_text(f"⏳ Розпізнаю... {i}%")
+            time.sleep(0.4)
 
-        ffmpeg.input(ogg_path).output(mp3_path).run(overwrite_output=True)
+        # Конвертація в mp3
+        subprocess.run([
+            "ffmpeg", "-i", ogg_path, mp3_path, "-y"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         with open(mp3_path, "rb") as audio_file:
             transcription = client.audio.transcriptions.create(
                 model="whisper-1",
-                file=audio_file
+                file=audio_file,
+                response_format="text",
             )
 
-        text = transcription.text
-        await message.reply_text(f"📄 Ось ваш текст:\n{text}")
+        await update.message.reply_text(f"✅ Ось ваш текст:\n\n{transcription}")
 
-    except RateLimitError:
-        await message.reply_text("⚠️ Перевищено ліміт OpenAI. Спробуйте пізніше або перевірте баланс.")
-    except AuthenticationError:
-        await message.reply_text("❌ API ключ OpenAI недійсний або відсутній.")
+    except OpenAIError as e:
+        logger.error("OpenAI error: %s", e)
+        await update.message.reply_text("❌ Сталася помилка з OpenAI: ймовірно, вичерпано ліміт. Спробуйте пізніше.")
     except Exception as e:
-        logger.error("Помилка при обробці голосу:", exc_info=e)
-        await message.reply_text("❗️ Сталася помилка при розпізнаванні голосу. Спробуйте ще раз.")
+        logger.error("Інша помилка: %s", e)
+        await update.message.reply_text("⚠️ Виникла помилка під час обробки. Перевірте файл і спробуйте ще раз.")
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚫 Надсилати потрібно *голосові повідомлення*, а не текст.", parse_mode="Markdown")
-
-if __name__ == '__main__':
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+    app.add_handler(MessageHandler(filters.TEXT, handle_text))
 
     app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080)),
-        webhook_url=f"{DOMAIN}/webhook"
+        port=8000,
+        webhook_url=WEBHOOK_URL
     )
+
+if __name__ == "__main__":
+    main()
