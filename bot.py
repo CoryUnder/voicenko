@@ -1,71 +1,72 @@
 import os
-import subprocess
 import logging
+import tempfile
+import requests
+
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-from openai import OpenAI
-import uuid
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Ініціалізація
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://your-railway-url.up.railway.app
-
-client = OpenAI(api_key=OPENAI_API_KEY)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+DEEPGRAM_API_KEY = os.getenv("STT_API_KEY")  # ключ Deepgram
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Стартова команда
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привіт! Я бот для розпізнавання голосових повідомлень. Просто надішли мені voice, і я надішлю текст!"
-    )
+    await update.message.reply_text("👋 Привіт! Надішли мені голосове повідомлення, і я перетворю його на текст.")
 
-# Обробка тексту — ігноруємо
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Надішли голосове повідомлення. Я працюю тільки з voice/audio.")
+    await update.message.reply_text("✍️ Тут обробляються тільки голосові повідомлення. Надішли voice.")
 
-# Обробка голосових
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    voice = update.message.voice
+    file = await context.bot.get_file(voice.file_id)
+
+    await update.message.reply_text("🎙️ Обробляю голосове повідомлення, зачекай...")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as f:
+        await file.download_to_drive(f.name)
+        audio_path = f.name
+
     try:
-        await update.message.reply_text("🎧 Обробляю аудіо… (0%)")
-
-        file = await context.bot.get_file(update.message.voice.file_id)
-        ogg_path = f"voice_{uuid.uuid4().hex}.oga"
-        mp3_path = ogg_path.replace(".oga", ".mp3")
-        await file.download_to_drive(ogg_path)
-
-        await update.message.reply_text("🔄 Конвертація в MP3… (33%)")
-        subprocess.run(["ffmpeg", "-i", ogg_path, mp3_path], check=True)
-
-        await update.message.reply_text("🧠 Надсилаю на OpenAI… (66%)")
-        with open(mp3_path, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file
+        # Надсилаємо файл у Deepgram
+        with open(audio_path, "rb") as audio_file:
+            response = requests.post(
+                "https://api.deepgram.com/v1/listen",
+                headers={
+                    "Authorization": f"Token {DEEPGRAM_API_KEY}",
+                    "Content-Type": "audio/ogg"
+                },
+                data=audio_file
             )
 
-        await update.message.reply_text(f"✅ Готово! Ось ваш текст:\n\n{transcription.text}")
+        if response.status_code == 200:
+            data = response.json()
+            text = data.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
+            if text:
+                await update.message.reply_text("📝 Ось ваш текст:\n\n" + text)
+            else:
+                await update.message.reply_text("🤔 Не вдалося розпізнати текст.")
+        else:
+            logger.error(f"Deepgram error: {response.status_code} - {response.text}")
+            await update.message.reply_text("⚠️ Сталася помилка при обробці аудіо. Спробуйте пізніше.")
 
     except Exception as e:
-        logging.error("Помилка при обробці голосу:", exc_info=True)
-        await update.message.reply_text("❌ Сталася помилка під час обробки. Можливо, перевищено ліміт OpenAI або файл пошкоджено.")
-    finally:
-        # Очищення файлів
-        if os.path.exists(ogg_path): os.remove(ogg_path)
-        if os.path.exists(mp3_path): os.remove(mp3_path)
+        logger.exception("Помилка при обробці голосу:")
+        await update.message.reply_text("⚠️ Виникла помилка при обробці повідомлення.")
+
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
-    # Запуск як вебхук
     app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.getenv("PORT", 8080)),
+        port=int(os.environ.get("PORT", 8080)),
         webhook_url=WEBHOOK_URL
     )
 
